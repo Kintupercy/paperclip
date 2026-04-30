@@ -74,7 +74,12 @@ ENV NODE_ENV=production \
   PAPERCLIP_DEPLOYMENT_EXPOSURE=private \
   OPENCODE_ALLOW_ALL_MODELS=true
 
-VOLUME ["/paperclip"]
+# VOLUME directive removed for Railway compatibility — Railway rejects
+# Dockerfile VOLUME directives and requires its own volume mounts. The
+# `/paperclip` path is still expected and is mounted via Railway's
+# managed volume; PAPERCLIP_HOME and PAPERCLIP_CONFIG already point at
+# it. Re-add this line if rebuilding for Docker / docker-compose.
+# VOLUME ["/paperclip"]
 EXPOSE 3100
 
 ENTRYPOINT ["docker-entrypoint.sh"]
