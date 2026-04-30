@@ -57,4 +57,25 @@ if [ -n "$AGENT_CONFIG_REPO" ]; then
     fi
 fi
 
+# Bootstrap the first instance admin if one hasn't been created yet.
+# Railway Hobby has no remote shell, so we run the bootstrap command on
+# container startup and surface the magic invite URL through the deploy
+# logs. The marker file ensures we only print the URL once (subsequent
+# restarts are no-ops). Delete the marker to re-bootstrap if needed.
+ADMIN_BOOTSTRAP_MARKER="/paperclip/instances/default/.admin_bootstrap_done"
+if [ ! -f "$ADMIN_BOOTSTRAP_MARKER" ]; then
+    echo "================================================================="
+    echo "Paperclip admin bootstrap — first run"
+    echo "================================================================="
+    if [ -d /app ]; then
+        cd /app && gosu node pnpm paperclipai auth bootstrap-ceo 2>&1 || \
+            echo "WARN: bootstrap-ceo failed (admin may already exist; continuing)"
+        gosu node mkdir -p "$(dirname "$ADMIN_BOOTSTRAP_MARKER")" 2>/dev/null || true
+        gosu node touch "$ADMIN_BOOTSTRAP_MARKER" 2>/dev/null || true
+    else
+        echo "WARN: /app directory missing; cannot run bootstrap"
+    fi
+    echo "================================================================="
+fi
+
 exec gosu node "$@"
