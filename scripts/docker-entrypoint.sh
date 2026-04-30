@@ -26,4 +26,14 @@ if [ "$changed" = "1" ]; then
     chown -R node:node /paperclip
 fi
 
+# Always ensure the node user owns the volume root. Container platforms
+# like Railway mount volumes owned by root over the Dockerfile's chown,
+# so even with no UID/GID remap the volume root may be unwritable.
+# Touching ownership of just the top-level dir is fast (no recurse) and
+# only needed once — Paperclip's own writes from there will be node-owned.
+if [ "$(stat -c '%u:%g' /paperclip)" != "$(id -u node):$(id -g node)" ]; then
+    echo "Fixing /paperclip ownership for node user"
+    chown node:node /paperclip
+fi
+
 exec gosu node "$@"
