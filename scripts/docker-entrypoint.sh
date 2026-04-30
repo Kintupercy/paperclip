@@ -36,4 +36,25 @@ if [ "$(stat -c '%u:%g' /paperclip)" != "$(id -u node):$(id -g node)" ]; then
     chown node:node /paperclip
 fi
 
+# Sync the agent-config repo onto the volume so Paperclip agents can
+# point at /paperclip/repos/immigro-news-alerts/paperclip-config/<role>
+# as their working directory. Idempotent: clones on first run, pulls on
+# every subsequent restart. Public repo, no auth needed for clone+pull.
+# Configurable via env var so other forks can point at their own repo.
+AGENT_CONFIG_REPO=${AGENT_CONFIG_REPO:-https://github.com/Kintupercy/immigro-news-alerts.git}
+AGENT_CONFIG_DIR=${AGENT_CONFIG_DIR:-/paperclip/repos/immigro-news-alerts}
+if [ -n "$AGENT_CONFIG_REPO" ]; then
+    mkdir -p "$(dirname "$AGENT_CONFIG_DIR")"
+    chown -R node:node "$(dirname "$AGENT_CONFIG_DIR")"
+    if [ ! -d "$AGENT_CONFIG_DIR/.git" ]; then
+        echo "Cloning agent config repo: $AGENT_CONFIG_REPO -> $AGENT_CONFIG_DIR"
+        gosu node git clone --depth 50 "$AGENT_CONFIG_REPO" "$AGENT_CONFIG_DIR" || \
+            echo "WARN: agent config clone failed (continuing — Paperclip starts regardless)"
+    else
+        echo "Refreshing agent config repo at $AGENT_CONFIG_DIR"
+        cd "$AGENT_CONFIG_DIR" && gosu node git pull --ff-only origin main || \
+            echo "WARN: agent config pull failed (continuing — Paperclip starts regardless)"
+    fi
+fi
+
 exec gosu node "$@"
