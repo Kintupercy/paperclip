@@ -57,19 +57,28 @@ if [ -n "$AGENT_CONFIG_REPO" ]; then
     fi
 fi
 
-# Bootstrap the first instance admin if one hasn't been created yet.
-# Railway Hobby has no remote shell, so we run the bootstrap command on
-# container startup and surface the magic invite URL through the deploy
-# logs. The marker file ensures we only print the URL once (subsequent
-# restarts are no-ops). Delete the marker to re-bootstrap if needed.
+# Initialize the Paperclip instance + bootstrap the first admin if not done.
+# Two-step: `paperclipai onboard --yes` writes the instance config, then
+# `auth bootstrap-ceo` prints the magic invite URL. Both happen on first
+# boot only — subsequent restarts skip via marker file.
 ADMIN_BOOTSTRAP_MARKER="/paperclip/instances/default/.admin_bootstrap_done"
+PAPERCLIP_CONFIG_FILE="/paperclip/instances/default/config.json"
 if [ ! -f "$ADMIN_BOOTSTRAP_MARKER" ]; then
     echo "================================================================="
-    echo "Paperclip admin bootstrap — first run"
+    echo "Paperclip first-run setup"
     echo "================================================================="
     if [ -d /app ]; then
-        cd /app && gosu node pnpm paperclipai auth bootstrap-ceo 2>&1 || \
-            echo "WARN: bootstrap-ceo failed (admin may already exist; continuing)"
+        cd /app
+        if [ ! -f "$PAPERCLIP_CONFIG_FILE" ]; then
+            echo "Step 1/2: paperclipai onboard --yes"
+            gosu node pnpm paperclipai onboard --yes 2>&1 || \
+                echo "WARN: onboard failed"
+        else
+            echo "Step 1/2: instance config already present, skipping onboard"
+        fi
+        echo "Step 2/2: paperclipai auth bootstrap-ceo"
+        gosu node pnpm paperclipai auth bootstrap-ceo 2>&1 || \
+            echo "WARN: bootstrap-ceo failed"
         gosu node mkdir -p "$(dirname "$ADMIN_BOOTSTRAP_MARKER")" 2>/dev/null || true
         gosu node touch "$ADMIN_BOOTSTRAP_MARKER" 2>/dev/null || true
     else
