@@ -70,8 +70,17 @@ fi
 # The invite URL prints to deploy logs. Marker is touched only on success
 # so failures self-heal on next boot. Skip the whole thing only when both
 # config AND marker exist.
-ADMIN_BOOTSTRAP_MARKER="/paperclip/instances/default/.admin_bootstrap_done"
+# Marker filename is intentionally versioned: a stale v1 marker exists on
+# this volume from a previous deploy where bootstrap-ceo failed but the
+# marker got touched anyway. Switching to v2 lets us ignore that stale
+# marker without needing volume access. The cleanup line below removes
+# it so we don't carry orphan files forever.
+ADMIN_BOOTSTRAP_MARKER="/paperclip/instances/default/.admin_bootstrap_done.v2"
+ADMIN_BOOTSTRAP_MARKER_LEGACY="/paperclip/instances/default/.admin_bootstrap_done"
 PAPERCLIP_CONFIG_FILE="/paperclip/instances/default/config.json"
+
+# Drop the stale v1 marker if present (one-time cleanup, idempotent).
+[ -f "$ADMIN_BOOTSTRAP_MARKER_LEGACY" ] && rm -f "$ADMIN_BOOTSTRAP_MARKER_LEGACY" 2>/dev/null || true
 
 if [ ! -f "$ADMIN_BOOTSTRAP_MARKER" ] && [ -d /app ]; then
     (
