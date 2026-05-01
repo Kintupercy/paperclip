@@ -70,17 +70,20 @@ fi
 # The invite URL prints to deploy logs. Marker is touched only on success
 # so failures self-heal on next boot. Skip the whole thing only when both
 # config AND marker exist.
-# Marker filename is intentionally versioned: a stale v1 marker exists on
-# this volume from a previous deploy where bootstrap-ceo failed but the
-# marker got touched anyway. Switching to v2 lets us ignore that stale
-# marker without needing volume access. The cleanup line below removes
-# it so we don't carry orphan files forever.
-ADMIN_BOOTSTRAP_MARKER="/paperclip/instances/default/.admin_bootstrap_done.v2"
-ADMIN_BOOTSTRAP_MARKER_LEGACY="/paperclip/instances/default/.admin_bootstrap_done"
+# Marker is versioned to invalidate stale ones on existing volumes when
+# the bootstrap behavior changes. v1 = pre-cwd-fix; v2 = had the bug
+# where local_trusted-mode bootstrap-ceo returned success without doing
+# anything (so the marker got touched even though no admin was created);
+# v3 = current logic, which patches config to authenticated mode first.
+ADMIN_BOOTSTRAP_MARKER="/paperclip/instances/default/.admin_bootstrap_done.v3"
 PAPERCLIP_CONFIG_FILE="/paperclip/instances/default/config.json"
 
-# Drop the stale v1 marker if present (one-time cleanup, idempotent).
-[ -f "$ADMIN_BOOTSTRAP_MARKER_LEGACY" ] && rm -f "$ADMIN_BOOTSTRAP_MARKER_LEGACY" 2>/dev/null || true
+# Drop stale legacy markers idempotently (no volume access needed).
+for legacy in \
+    /paperclip/instances/default/.admin_bootstrap_done \
+    /paperclip/instances/default/.admin_bootstrap_done.v2; do
+    [ -f "$legacy" ] && rm -f "$legacy" 2>/dev/null || true
+done
 
 if [ ! -f "$ADMIN_BOOTSTRAP_MARKER" ] && [ -d /app ]; then
     (
@@ -97,15 +100,45 @@ if [ ! -f "$ADMIN_BOOTSTRAP_MARKER" ] && [ -d /app ]; then
         # Small grace period for migrations to finish post-listen.
         sleep 3
         cd /app
+
+        # Critical: `paperclipai onboard --yes` ignores PAPERCLIP_DEPLOYMENT_MODE
+        # and writes server.deploymentMode = "local_trusted" in config.json.
+        # The bootstrap-ceo CLI reads that file and short-circuits with a
+        # no-op message when mode != "authenticated". We've configured the
+        # *runtime* (via env vars) for authenticated mode behind the
+        # Cloudflare tunnel + Access; patch the saved config to match so
+        # bootstrap-ceo actually generates the invite. Idempotent: only
+        # rewrites the file when the field isn't already authenticated.
+        if [ -f "$PAPERCLIP_CONFIG_FILE" ]; then
+            current_mode=$(gosu node jq -r '.server.deploymentMode // empty' "$PAPERCLIP_CONFIG_FILE" 2>/dev/null || true)
+            if [ "$current_mode" != "authenticated" ]; then
+                echo "Patching config.json: server.deploymentMode (${current_mode:-<unset>} -> authenticated)"
+                tmp_cfg=$(mktemp)
+                chown node:node "$tmp_cfg" 2>/dev/null || true
+                if gosu node jq '.server.deploymentMode = "authenticated"' "$PAPERCLIP_CONFIG_FILE" > "$tmp_cfg"; then
+                    gosu node mv "$tmp_cfg" "$PAPERCLIP_CONFIG_FILE" || \
+                        { rm -f "$tmp_cfg" 2>/dev/null; echo "WARN: config patch mv failed"; }
+                else
+                    rm -f "$tmp_cfg" 2>/dev/null
+                    echo "WARN: jq patch of config.json failed"
+                fi
+            fi
+        fi
+
         echo "================================================================="
         echo "Paperclip background bootstrap: paperclipai auth bootstrap-ceo"
         echo "================================================================="
-        if gosu node pnpm paperclipai auth bootstrap-ceo 2>&1; then
+        # Capture output so we can verify an invite was actually printed —
+        # the CLI exits 0 even on no-op short-circuits, so exit code alone
+        # is not a reliable success signal.
+        bootstrap_log=$(gosu node pnpm paperclipai auth bootstrap-ceo 2>&1 || true)
+        printf '%s\n' "$bootstrap_log"
+        if printf '%s' "$bootstrap_log" | grep -q '/invite/pcp_bootstrap_'; then
             gosu node mkdir -p "$(dirname "$ADMIN_BOOTSTRAP_MARKER")" 2>/dev/null || true
             gosu node touch "$ADMIN_BOOTSTRAP_MARKER" 2>/dev/null || true
             echo "Bootstrap marker set; this will not run again on subsequent boots."
         else
-            echo "WARN: bootstrap-ceo failed; leaving marker absent so next boot retries"
+            echo "WARN: bootstrap-ceo did not produce an invite URL; leaving marker absent so next boot retries"
         fi
         echo "================================================================="
     ) &
