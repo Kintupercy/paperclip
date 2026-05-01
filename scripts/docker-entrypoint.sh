@@ -108,20 +108,32 @@ if [ ! -f "$ADMIN_BOOTSTRAP_MARKER" ] && [ -d /app ]; then
         # *runtime* (via env vars) for authenticated mode behind the
         # Cloudflare tunnel + Access; patch the saved config to match so
         # bootstrap-ceo actually generates the invite. Idempotent: only
-        # rewrites the file when the field isn't already authenticated.
+        # rewrites when the field isn't already authenticated. Runs as
+        # root (no gosu) because jq lives at /usr/bin/jq, which isn't
+        # always on the node user's PATH; root can read/write the file
+        # regardless of ownership, and we chown back afterward.
         if [ -f "$PAPERCLIP_CONFIG_FILE" ]; then
-            current_mode=$(gosu node jq -r '.server.deploymentMode // empty' "$PAPERCLIP_CONFIG_FILE" 2>/dev/null || true)
+            current_mode=$(jq -r '.server.deploymentMode // empty' "$PAPERCLIP_CONFIG_FILE" 2>/dev/null || true)
             if [ "$current_mode" != "authenticated" ]; then
                 echo "Patching config.json: server.deploymentMode (${current_mode:-<unset>} -> authenticated)"
                 tmp_cfg=$(mktemp)
-                chown node:node "$tmp_cfg" 2>/dev/null || true
-                if gosu node jq '.server.deploymentMode = "authenticated"' "$PAPERCLIP_CONFIG_FILE" > "$tmp_cfg"; then
-                    gosu node mv "$tmp_cfg" "$PAPERCLIP_CONFIG_FILE" || \
-                        { rm -f "$tmp_cfg" 2>/dev/null; echo "WARN: config patch mv failed"; }
+                tmp_err=$(mktemp)
+                if jq '.server.deploymentMode = "authenticated"' "$PAPERCLIP_CONFIG_FILE" >"$tmp_cfg" 2>"$tmp_err"; then
+                    if [ -s "$tmp_cfg" ] && head -c1 "$tmp_cfg" | grep -q '{'; then
+                        mv "$tmp_cfg" "$PAPERCLIP_CONFIG_FILE"
+                        chown node:node "$PAPERCLIP_CONFIG_FILE" 2>/dev/null || true
+                        chmod 0644 "$PAPERCLIP_CONFIG_FILE" 2>/dev/null || true
+                        echo "Config patched: deploymentMode now authenticated"
+                    else
+                        rm -f "$tmp_cfg"
+                        echo "WARN: jq output looked invalid; aborting patch"
+                    fi
                 else
-                    rm -f "$tmp_cfg" 2>/dev/null
-                    echo "WARN: jq patch of config.json failed"
+                    jq_err=$(cat "$tmp_err" 2>/dev/null || echo "<no stderr>")
+                    rm -f "$tmp_cfg"
+                    echo "WARN: jq exit nonzero. stderr: $jq_err"
                 fi
+                rm -f "$tmp_err"
             fi
         fi
 
