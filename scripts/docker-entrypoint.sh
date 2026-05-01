@@ -58,43 +58,62 @@ if [ -n "$AGENT_CONFIG_REPO" ]; then
 fi
 
 # Initialize the Paperclip instance + bootstrap the first admin if not done.
-# Two-step: `paperclipai onboard --yes` writes the instance config, then
-# `auth bootstrap-ceo` prints the magic invite URL. Skip only when BOTH
-# the instance config and the success marker are present — that way a
-# previously-failed run (config never written) self-heals on next boot
-# instead of being permanently disabled by a marker that lies.
+#
+# Tricky sequencing: `paperclipai onboard --yes` writes the instance config
+# AND auto-starts the server (it's quickstart-equivalent). With embedded-pg
+# (our mode), onboard does NOT print the bootstrap invite inline — that
+# only happens when database is external Postgres. So we must run
+# `auth bootstrap-ceo` AFTER the embedded-pg server is up.
+#
+# Solution: spawn a background process that polls the local server health
+# endpoint, then runs `auth bootstrap-ceo` against the running embedded-pg.
+# The invite URL prints to deploy logs. Marker is touched only on success
+# so failures self-heal on next boot. Skip the whole thing only when both
+# config AND marker exist.
 ADMIN_BOOTSTRAP_MARKER="/paperclip/instances/default/.admin_bootstrap_done"
 PAPERCLIP_CONFIG_FILE="/paperclip/instances/default/config.json"
-if [ ! -f "$PAPERCLIP_CONFIG_FILE" ] || [ ! -f "$ADMIN_BOOTSTRAP_MARKER" ]; then
-    echo "================================================================="
-    echo "Paperclip first-run setup"
-    echo "================================================================="
-    if [ -d /app ]; then
+
+if [ ! -f "$ADMIN_BOOTSTRAP_MARKER" ] && [ -d /app ]; then
+    (
+        # Wait up to ~3 minutes for the paperclip server's health endpoint.
+        # 8080 is bound by `paperclipai run` after embedded-pg is up and
+        # migrations have applied — that's exactly when bootstrap-ceo can
+        # safely query the DB.
+        for i in $(seq 1 90); do
+            sleep 2
+            if curl -fsS -m 2 http://127.0.0.1:8080/api/health >/dev/null 2>&1; then
+                break
+            fi
+        done
+        # Small grace period for migrations to finish post-listen.
+        sleep 3
         cd /app
-        if [ ! -f "$PAPERCLIP_CONFIG_FILE" ]; then
-            echo "Step 1/2: paperclipai onboard --yes"
-            gosu node pnpm paperclipai onboard --yes 2>&1 || \
-                echo "WARN: onboard failed"
-        else
-            echo "Step 1/2: instance config already present, skipping onboard"
-        fi
-        echo "Step 2/2: paperclipai auth bootstrap-ceo"
+        echo "================================================================="
+        echo "Paperclip background bootstrap: paperclipai auth bootstrap-ceo"
+        echo "================================================================="
         if gosu node pnpm paperclipai auth bootstrap-ceo 2>&1; then
             gosu node mkdir -p "$(dirname "$ADMIN_BOOTSTRAP_MARKER")" 2>/dev/null || true
             gosu node touch "$ADMIN_BOOTSTRAP_MARKER" 2>/dev/null || true
+            echo "Bootstrap marker set; this will not run again on subsequent boots."
         else
             echo "WARN: bootstrap-ceo failed; leaving marker absent so next boot retries"
         fi
-    else
-        echo "WARN: /app directory missing; cannot run bootstrap"
-    fi
-    echo "================================================================="
+        echo "================================================================="
+    ) &
 fi
 
 # Paperclip's CMD uses relative paths (./server/node_modules/tsx/...,
 # server/dist/index.js) so cwd MUST be /app at exec time. The agent-config
-# git pull above cd's into the immigro repo, and the bootstrap branch may
-# have been skipped, so restore /app explicitly here.
+# git pull above cd's into the immigro repo, so restore /app here.
 cd /app 2>/dev/null || true
+
+# First boot: config doesn't exist yet, so we must run onboard to write it.
+# Onboard --yes auto-starts the server (the same server the CMD would
+# launch), so this becomes the foreground process. Subsequent boots have
+# config present and skip straight to the CMD.
+if [ ! -f "$PAPERCLIP_CONFIG_FILE" ]; then
+    echo "First boot detected (no config). Running paperclipai onboard --yes."
+    exec gosu node pnpm paperclipai onboard --yes
+fi
 
 exec gosu node "$@"
